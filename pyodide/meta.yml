@@ -1,0 +1,52 @@
+package:
+  name: pybammsolvers
+  version: 0.1.0
+  tag:
+    - pybammsolvers
+  top-level:
+    - pybammsolvers
+
+source:
+  url: https://github.com/pybamm-team/pybammsolvers/archive/refs/tags/v0.1.0.tar.gz
+  sha256: <INSERT_SHA256_HERE>
+
+requirements:
+  host:
+    - cmake
+    - python
+    - py-pybind11
+  run:
+    - py-casadi
+    - py-suitesparse
+    - py-sundials
+    - python
+
+build:
+  exports: requested
+  cflags: |
+    -fexceptions -frtti
+  cxxflags: |
+    -fexceptions -frtti
+  ldflags: |
+    -fexceptions
+  build_script: |
+    mkdir build && cd build
+    emcmake cmake .. \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=${PREFIX} \
+      -DPYTHON_EXECUTABLE=${PREFIX}/bin/python3 \
+      -DBUILD_PYBAMMSOLVERS_PYTHON=ON \
+      -DSUNDIALS_DIR=${PREFIX} \
+      -DSUITESPARSE_DIR=${PREFIX} \
+      -DCASADI_DIR=${PREFIX}
+    emmake make -j$(nproc)
+    emmake make install
+
+about:
+  home: https://github.com/pybamm-team/pybammsolvers
+  license: BSD-3-Clause
+  summary: C++/pybind11 wrappers for PyBaMM’s IDAKLU & Casadi/Sundials solvers
+
+extra:
+  recipe-maintainers:
+    - your-github-username

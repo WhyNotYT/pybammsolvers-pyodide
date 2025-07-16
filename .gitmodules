@@ -3,7 +3,7 @@
 	url = https://github.com/pybind/pybind11.git
 [submodule "sundials"]
 	path = sundials
-	url = git@github.com:LLNL/sundials.git
+	url = https://github.com/LLNL/sundials.git
 [submodule "SuiteSparse"]
 	path = SuiteSparse
-	url = git@github.com:DrTimothyAldenDavis/SuiteSparse.git
+	url = https://github.com/DrTimothyAldenDavis/SuiteSparse.git

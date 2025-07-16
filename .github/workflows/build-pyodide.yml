@@ -1,0 +1,35 @@
+name: Build Pyodide package
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-pyodide:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.13
+
+      - name: Install Pyodide build tools
+        run: |
+          pip install pyodide-build
+
+      - name: Build pybammsolvers for Pyodide
+        run: |
+          pyodide build pyodide/meta.yaml
+
+      - name: Upload built package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pybammsolvers-pyodide
+          path: dist/
+
+      # Optional: deploy to GitHub Pages
