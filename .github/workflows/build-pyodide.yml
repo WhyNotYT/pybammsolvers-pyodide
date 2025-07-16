@@ -18,18 +18,33 @@ jobs:
         with:
           python-version: 3.13
 
-      - name: Install Pyodide build tools
+      - name: Cache emsdk
+        uses: actions/cache@v4
+        with:
+          path: emsdk
+          key: emsdk-cache-v1
+
+      - name: Install Emscripten and Build Pyodide package
         run: |
+          # Install Emscripten
+          git clone https://github.com/emscripten-core/emsdk.git
+          cd emsdk
+          ./emsdk install 4.0.9
+          ./emsdk activate 4.0.9
+          source ./emsdk_env.sh
+
+          # Go back to project root
+          cd ..
+
+          # Install Pyodide build tools
           pip install pyodide-build
 
-      - name: Build pybammsolvers for Pyodide
-        run: |
+          # Build Pyodide package
           pyodide build pyodide/meta.yaml
+        shell: bash
 
       - name: Upload built package artifact
         uses: actions/upload-artifact@v4
         with:
           name: pybammsolvers-pyodide
           path: dist/
-
-      # Optional: deploy to GitHub Pages
