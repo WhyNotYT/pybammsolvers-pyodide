@@ -40,7 +40,7 @@ jobs:
           pip install pyodide-build
 
           # Build Pyodide package
-          pyodide build pyodide/meta.yaml
+          pyodide build pyodide/meta.yml
         shell: bash
 
       - name: Upload built package artifact
