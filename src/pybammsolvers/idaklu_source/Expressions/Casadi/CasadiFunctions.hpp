@@ -19,6 +19,7 @@ public:
    * @brief Constructor
    */
   explicit CasadiFunction(const BaseFunctionType &f);
+  ~CasadiFunction();
 
   // Method overrides
   void operator()() override;

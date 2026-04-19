@@ -9,85 +9,113 @@ import pathlib
 
 
 def build_solvers():
-    DEFAULT_INSTALL_DIR = str(pathlib.Path(__file__).parent.resolve() / ".idaklu")
+    DEFAULT_INSTALL_DIR = str(pathlib.Path(__file__).parent.resolve() / ".idaklu_wasm")
+    EMSDK_ROOT = str(pathlib.Path(__file__).parent.resolve() / "emsdk")
+    EMSCRIPTEN_TOOLCHAIN = str(pathlib.Path(EMSDK_ROOT) / "upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake")
 
     def safe_remove_dir(path):
         if os.path.exists(path):
             shutil.rmtree(path)
 
     def install_suitesparse():
-        # The SuiteSparse KLU module has 4 dependencies:
-        # - suitesparseconfig
-        # - AMD
-        # - COLAMD
-        # - BTF
-        suitesparse_src = pathlib.Path("SuiteSparse")
-        print("-" * 10, "Building SuiteSparse_config", "-" * 40)
-        make_cmd = [
-            "make",
-            "library",
-        ]
-        install_cmd = [
-            "make",
-            f"-j{cpu_count()}",
-            "install",
-        ]
+        suitesparse_src = pathlib.Path("SuiteSparse").resolve()
         print("-" * 10, "Building SuiteSparse", "-" * 40)
-        # Set CMAKE_OPTIONS as environment variables to pass to the GNU Make command
-        env = os.environ.copy()
+
+        common_cmake_args = [
+            f"-DCMAKE_INSTALL_PREFIX={DEFAULT_INSTALL_DIR}",
+            f"-DCMAKE_PREFIX_PATH={DEFAULT_INSTALL_DIR}",
+            f"-DCMAKE_TOOLCHAIN_FILE={EMSCRIPTEN_TOOLCHAIN}",
+            "-DSUITESPARSE_DEMOS=OFF",
+            "-DSUITESPARSE_USE_FORTRAN=OFF",
+            "-DSUITESPARSE_USE_OPENMP=OFF",
+            "-DSUITESPARSE_USE_BLAS=OFF",
+            "-DBLAS_FOUND=TRUE",
+            "-DBLAS_LIBRARIES=",
+            "-DBUILD_SHARED_LIBS=OFF",
+            "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
+            "-DCMAKE_BUILD_TYPE=Release",
+        ]
+
+        component_extra_args = {
+            "SuiteSparse_config": [],
+            "AMD": [
+                f"-DSuiteSparse_config_DIR={DEFAULT_INSTALL_DIR}/lib/cmake/SuiteSparse_config",
+            ],
+            "COLAMD": [
+                f"-DSuiteSparse_config_DIR={DEFAULT_INSTALL_DIR}/lib/cmake/SuiteSparse_config",
+            ],
+            "BTF": [
+                f"-DSuiteSparse_config_DIR={DEFAULT_INSTALL_DIR}/lib/cmake/SuiteSparse_config",
+            ],
+            "KLU": [
+                f"-DSuiteSparse_config_DIR={DEFAULT_INSTALL_DIR}/lib/cmake/SuiteSparse_config",
+                f"-DAMD_DIR={DEFAULT_INSTALL_DIR}/lib/cmake/AMD",
+                f"-DCOLAMD_DIR={DEFAULT_INSTALL_DIR}/lib/cmake/COLAMD",
+                f"-DBTF_DIR={DEFAULT_INSTALL_DIR}/lib/cmake/BTF",
+            ],
+        }
+
         for libdir in ["SuiteSparse_config", "AMD", "COLAMD", "BTF", "KLU"]:
-            build_dir = os.path.join(suitesparse_src, libdir)
-            # We want to ensure that libsuitesparseconfig.dylib is not repeated in
-            # multiple paths at the time of wheel repair. Therefore, it should not be
-            # built with an RPATH since it is copied to the install prefix.
-            if libdir == "SuiteSparse_config":
-                # if in CI, set RPATH to the install directory for SuiteSparse_config
-                # dylibs to find libomp.dylib when repairing the wheel
-                if os.environ.get("CIBUILDWHEEL") == "1":
-                    env["CMAKE_OPTIONS"] = (
-                        f"-DCMAKE_INSTALL_PREFIX={DEFAULT_INSTALL_DIR} -DCMAKE_INSTALL_RPATH={DEFAULT_INSTALL_DIR}/lib"
-                    )
-                else:
-                    env["CMAKE_OPTIONS"] = (
-                        f"-DCMAKE_INSTALL_PREFIX={DEFAULT_INSTALL_DIR}"
-                    )
-            else:
-                # For AMD, COLAMD, BTF and KLU; do not set a BUILD RPATH but use an
-                # INSTALL RPATH in order to ensure that the dynamic libraries are found
-                # at runtime just once. Otherwise, delocate complains about multiple
-                # references to the SuiteSparse_config dynamic library (auditwheel does not).
-                env["CMAKE_OPTIONS"] = (
-                    f"-DCMAKE_INSTALL_PREFIX={DEFAULT_INSTALL_DIR} -DCMAKE_INSTALL_RPATH={DEFAULT_INSTALL_DIR}/lib -DCMAKE_INSTALL_RPATH_USE_LINK_PATH=FALSE -DCMAKE_BUILD_WITH_INSTALL_RPATH=FALSE"
-                )
+            src_dir = suitesparse_src / libdir
+            build_dir = src_dir / "build"
+            if build_dir.exists():
+                shutil.rmtree(build_dir)
+            os.makedirs(build_dir, exist_ok=True)
 
-            env["CMAKE_OPTIONS"] += (
-                " -DSUITESPARSE_DEMOS=OFF -DSUITESPARSE_USE_FORTRAN=OFF"
+            extra_args = component_extra_args[libdir]
+
+            print(f"--- Configuring {libdir} ---")
+            subprocess.run(
+                ["emcmake", "cmake", str(src_dir), *common_cmake_args, *extra_args],
+                cwd=build_dir, check=True
             )
+            print(f"--- Building {libdir} ---")
+            subprocess.run(["cmake", "--build", ".", f"-j{cpu_count()}"], cwd=build_dir, check=True)
+            print(f"--- Installing {libdir} ---")
+            subprocess.run(["cmake", "--install", "."], cwd=build_dir, check=True)
 
-            subprocess.run(make_cmd, cwd=build_dir, env=env, shell=True, check=True)
-            subprocess.run(install_cmd, cwd=build_dir, check=True)
+        # Some toolchains install static archives under lib64. Normalize to lib
+        # so downstream checks and CMake args remain stable.
+        lib_dir = pathlib.Path(DEFAULT_INSTALL_DIR) / "lib"
+        lib64_dir = pathlib.Path(DEFAULT_INSTALL_DIR) / "lib64"
+        if (not lib_dir.exists()) and lib64_dir.exists():
+            lib_dir.symlink_to("lib64")
 
     def install_sundials():
         KLU_INCLUDE_DIR = os.path.join(DEFAULT_INSTALL_DIR, "include", "suitesparse")
         KLU_LIBRARY_DIR = os.path.join(DEFAULT_INSTALL_DIR, "lib")
+
+        # Write a cmake initial cache file to bypass cross-compilation find_library issues
+        cache_file = pathlib.Path("build_sundials_cache.cmake")
+        cache_file.write_text(f"""
+    set(KLU_FOUND TRUE CACHE BOOL "" FORCE)
+    set(KLU_INCLUDE_DIR "{KLU_INCLUDE_DIR}" CACHE PATH "" FORCE)
+    set(KLU_LIBRARY "{KLU_LIBRARY_DIR}/libklu.a" CACHE FILEPATH "" FORCE)
+    set(AMD_LIBRARY "{KLU_LIBRARY_DIR}/libamd.a" CACHE FILEPATH "" FORCE)
+    set(COLAMD_LIBRARY "{KLU_LIBRARY_DIR}/libcolamd.a" CACHE FILEPATH "" FORCE)
+    set(BTF_LIBRARY "{KLU_LIBRARY_DIR}/libbtf.a" CACHE FILEPATH "" FORCE)
+    set(SUITESPARSECONFIG_LIBRARY "{KLU_LIBRARY_DIR}/libsuitesparseconfig.a" CACHE FILEPATH "" FORCE)
+    set(KLU_LIBRARIES "{KLU_LIBRARY_DIR}/libklu.a;{KLU_LIBRARY_DIR}/libamd.a;{KLU_LIBRARY_DIR}/libcolamd.a;{KLU_LIBRARY_DIR}/libbtf.a;{KLU_LIBRARY_DIR}/libsuitesparseconfig.a" CACHE STRING "" FORCE)
+    """)
+
         cmake_args = [
-            "-DENABLE_LAPACK=ON",
+            f"-C{cache_file.resolve()}",
+            f"-DCMAKE_TOOLCHAIN_FILE={EMSCRIPTEN_TOOLCHAIN}",
+            "-DENABLE_LAPACK=OFF",
+            "-DENABLE_OPENMP=OFF",
             "-DSUNDIALS_INDEX_SIZE=32",
             "-DEXAMPLES_ENABLE_C=OFF",
             "-DEXAMPLES_ENABLE_CXX=OFF",
             "-DEXAMPLES_INSTALL=OFF",
             "-DENABLE_KLU=ON",
-            "-DENABLE_OPENMP=ON",
+            "-DBUILD_SHARED_LIBS=OFF",
+            "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
             f"-DKLU_INCLUDE_DIR={KLU_INCLUDE_DIR}",
             f"-DKLU_LIBRARY_DIR={KLU_LIBRARY_DIR}",
             "-DCMAKE_INSTALL_PREFIX=" + DEFAULT_INSTALL_DIR,
-            # on macOS use fixed paths rather than rpath
-            "-DCMAKE_INSTALL_NAME_DIR=" + KLU_LIBRARY_DIR,
+            "-DCMAKE_Fortran_COMPILER_WORKS=TRUE",
         ]
-
-        # try to find OpenMP on mac
         if platform.system() == "Darwin":
-            # flags to find OpenMP on mac
             if platform.processor() == "arm":
                 OpenMP_C_FLAGS = (
                     "-Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include"
@@ -106,13 +134,6 @@ def build_solvers():
                     "Only 'arm' and 'i386' architectures are supported."
                 )
 
-            # Don't pass the following args to CMake when building wheels. We set a custom
-            # OpenMP installation for macOS wheels in the wheel build script.
-            # This is because we can't use Homebrew's OpenMP dylib due to the wheel
-            # repair process, where Homebrew binaries are not built for distribution and
-            # break MACOSX_DEPLOYMENT_TARGET. We use a custom OpenMP binary as described
-            # in CIBW_BEFORE_ALL in the wheel builder CI job.
-            # Check for CI environment variable to determine if we are building a wheel
             if os.environ.get("CIBUILDWHEEL") != "1":
                 print("Using Homebrew OpenMP for macOS build")
                 cmake_args += [
@@ -128,14 +149,20 @@ def build_solvers():
 
         sundials_src = "../sundials"
         print("-" * 10, "Running CMake prepare", "-" * 40)
-        subprocess.run(["cmake", sundials_src, *cmake_args], cwd=build_dir, check=True)
+        env = os.environ.copy()
+        klu_libs = f"{KLU_LIBRARY_DIR}/libklu.a;{KLU_LIBRARY_DIR}/libamd.a;{KLU_LIBRARY_DIR}/libcolamd.a;{KLU_LIBRARY_DIR}/libbtf.a;{KLU_LIBRARY_DIR}/libsuitesparseconfig.a"
+        env["KLU_LIBRARIES"] = klu_libs
+
+        subprocess.run(
+            ["emcmake", "cmake", sundials_src, *cmake_args],
+            cwd=build_dir, check=True, env=env
+        )
 
         print("-" * 10, "Building SUNDIALS", "-" * 40)
         make_cmd = ["make", f"-j{cpu_count()}", "install"]
         subprocess.run(make_cmd, cwd=build_dir, check=True)
 
     def check_libraries_installed():
-        # Define the directories to check for SUNDIALS and SuiteSparse libraries
         lib_dirs = [DEFAULT_INSTALL_DIR]
 
         sundials_files = [
@@ -143,17 +170,14 @@ def build_solvers():
             "libsundials_sunlinsolklu",
             "libsundials_sunlinsoldense",
             "libsundials_sunlinsolspbcgs",
-            "libsundials_sunlinsollapackdense",
             "libsundials_sunmatrixsparse",
             "libsundials_nvecserial",
-            "libsundials_nvecopenmp",
         ]
         if platform.system() == "Linux":
             sundials_files = [file + ".so" for file in sundials_files]
         elif platform.system() == "Darwin":
             sundials_files = [file + ".dylib" for file in sundials_files]
         sundials_lib_found = True
-        # Check for SUNDIALS libraries in each directory
         for lib_file in sundials_files:
             file_found = False
             for lib_dir in lib_dirs:
@@ -175,9 +199,16 @@ def build_solvers():
             "libcolamd",
             "libbtf",
         ]
-        if platform.system() == "Linux":
+        is_wasm = "wasm" in DEFAULT_INSTALL_DIR
+
+        if is_wasm:
+            sundials_files = [file + ".a" for file in sundials_files]
+            suitesparse_files = [file + ".a" for file in suitesparse_files]
+        elif platform.system() == "Linux":
+            sundials_files = [file + ".so" for file in sundials_files]
             suitesparse_files = [file + ".so" for file in suitesparse_files]
         elif platform.system() == "Darwin":
+            sundials_files = [file + ".dylib" for file in sundials_files]
             suitesparse_files = [file + ".dylib" for file in suitesparse_files]
         else:
             raise NotImplementedError(
@@ -185,7 +216,6 @@ def build_solvers():
             )
 
         suitesparse_lib_found = True
-        # Check for SuiteSparse libraries in each directory
         for lib_file in suitesparse_files:
             file_found = False
             for lib_dir in lib_dirs:
@@ -202,13 +232,9 @@ def build_solvers():
 
         return sundials_lib_found, suitesparse_lib_found
 
-    # First check requirements: make and cmake
     check_build_tools()
-
-    # Build in parallel wherever possible
     os.environ["CMAKE_BUILD_PARALLEL_LEVEL"] = str(cpu_count())
 
-    # Get installation location
     parser = argparse.ArgumentParser(
         description="Compile and install Sundials and SuiteSparse."
     )
@@ -226,10 +252,8 @@ def build_solvers():
         safe_remove_dir(pathlib.Path("build_sundials"))
         sundials_found, suitesparse_found = False, False
     else:
-        # Check whether the libraries are installed
         sundials_found, suitesparse_found = check_libraries_installed()
 
-    # Determine which libraries to install
     if not suitesparse_found:
         install_suitesparse()
     if not sundials_found:

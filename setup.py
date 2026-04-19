@@ -12,13 +12,30 @@ from setuptools.command.bdist_wheel import bdist_wheel
 import pybind11
 from pybind11.setup_helpers import Pybind11Extension, build_ext
 
-default_lib_dir = (
-    "" if system() == "Windows" else str(Path(__file__).parent.resolve() / ".idaklu")
-)
+def _is_wasm_build():
+    cc = os.environ.get("CC", "")
+    return (
+        "EMSCRIPTEN" in os.environ
+        or os.environ.get("EMSDK")
+        or os.environ.get("EM_CONFIG")
+        or "emcc" in cc
+        or "pywasmcross" in cc
+        or "emscripten" in cc
+    )
+
+
+def _get_default_lib_dir():
+    if system() == "Windows":
+        return ""
+    lib_name = ".idaklu_wasm" if _is_wasm_build() else ".idaklu"
+    return str(Path(__file__).parent.resolve() / lib_name)
+
+
+default_lib_dir = _get_default_lib_dir()
 
 INCLUDE_DIRS = [str(Path(default_lib_dir) / "include"), pybind11.get_include()]
 
-USE_PYTHON_CASADI = False if system() == "Windows" else True
+USE_PYTHON_CASADI = False if (system() == "Windows" or _is_wasm_build()) else True
 
 # ---------- set environment variables for vcpkg on Windows ----------------------------
 
@@ -108,23 +125,31 @@ class CMakeBuild(build_ext):
         os.environ["CMAKE_BUILD_PARALLEL_LEVEL"] = str(cpu_count())
 
         build_type = os.getenv("PYBAMM_CPP_BUILD_TYPE", "Release")
-        idaklu_expr_casadi = os.getenv("PYBAMM_IDAKLU_EXPR_CASADI", "ON")
+        if _is_wasm_build():
+            idaklu_expr_casadi = os.getenv("PYBAMM_IDAKLU_EXPR_CASADI", "OFF")
+        else:
+            idaklu_expr_casadi = os.getenv("PYBAMM_IDAKLU_EXPR_CASADI", "ON")
 
         pybind11_cmake_dir = pybind11.get_cmake_dir()
 
         cmake_args = [
             f"-DCMAKE_BUILD_TYPE={build_type}",
             f"-DPYTHON_EXECUTABLE={sys.executable}",
+            f"-DPython_EXECUTABLE={sys.executable}",
             "-DUSE_PYTHON_CASADI={}".format("TRUE" if USE_PYTHON_CASADI else "FALSE"),
             f"-DPYBAMM_IDAKLU_EXPR_CASADI={idaklu_expr_casadi}",
             f"-Dpybind11_DIR={pybind11_cmake_dir}",
         ]
+        if os.environ.get("PYTHONINCLUDE"):
+            cmake_args.append(f"-DPython_INCLUDE_DIRS={os.environ['PYTHONINCLUDE']}")
         if self.suitesparse_root:
             cmake_args.append(
                 f"-DSuiteSparse_ROOT={os.path.abspath(self.suitesparse_root)}"
             )
         if self.sundials_root:
             cmake_args.append(f"-DSUNDIALS_ROOT={os.path.abspath(self.sundials_root)}")
+        if os.environ.get("CASADI_ROOT"):
+            cmake_args.append(f"-DCASADI_ROOT={os.path.abspath(os.environ['CASADI_ROOT'])}")
 
         if USE_PYTHON_CASADI:
             casadi_include = get_casadi_python_include_dir()
@@ -195,6 +220,10 @@ class CMakeBuild(build_ext):
         # build/lib.linux-x86_64-3.5/idaklu.cpython-37m-x86_64-linux-gnu.so
         dest_path = Path(self.get_ext_fullpath(ext.name)).resolve()
         source_path = build_temp / os.path.basename(self.get_ext_filename(ext.name))
+        if not source_path.exists():
+            matches = sorted(build_temp.glob("idaklu*.so"))
+            if matches:
+                source_path = matches[0]
         dest_directory = dest_path.parents[0]
         dest_directory.mkdir(parents=True, exist_ok=True)
         self.copy_file(source_path, dest_path)

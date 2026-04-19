@@ -32,6 +32,34 @@ endif ()
 # casadi seems to compile without the newer versions of std::string
 add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=0)
 
+# --- Python and pybind11 Bridge for Pyodide ---
+if(PYTHON_EXECUTABLE AND NOT Python_EXECUTABLE)
+    set(Python_EXECUTABLE "${PYTHON_EXECUTABLE}")
+endif()
+
+if(EMSCRIPTEN OR CMAKE_CROSSCOMPILING)
+    if(DEFINED ENV{PYTHONINCLUDE} AND NOT "$ENV{PYTHONINCLUDE}" STREQUAL "")
+        set(_pyodide_inc "$ENV{PYTHONINCLUDE}")
+    else()
+        execute_process(
+            COMMAND "${Python_EXECUTABLE}" -c
+            "import sysconfig; print(sysconfig.get_path('include'))"
+            OUTPUT_VARIABLE _pyodide_inc
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+    endif()
+    if(_pyodide_inc)
+        message(STATUS "Pyodide/cross build: pre-setting Python include dir to ${_pyodide_inc}")
+        set(Python_INCLUDE_DIR  "${_pyodide_inc}" CACHE PATH "Python include dir (Pyodide)"  FORCE)
+        set(Python3_INCLUDE_DIR "${_pyodide_inc}" CACHE PATH "Python3 include dir (Pyodide)" FORCE)
+    else()
+        message(FATAL_ERROR "Could not determine Python include dir for cross-compilation build")
+    endif()
+endif()
+
+set(Python_FIND_STRATEGY LOCATION)
+set(PYBIND11_FINDPYTHON ON)
+find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 find_package(pybind11 CONFIG REQUIRED)
 
 # Check Casadi build flag
@@ -184,12 +212,24 @@ if (${USE_PYTHON_CASADI})
     endif ()
 else ()
     message("Trying to link against any casadi package apart from the Python one")
-    find_package(casadi CONFIG REQUIRED)
-    # casadi 3.7+ exports the target as casadi::casadi instead of casadi
-    if(TARGET casadi::casadi)
-        target_link_libraries(idaklu PRIVATE casadi::casadi)
+    if(DEFINED CASADI_ROOT AND NOT "${CASADI_ROOT}" STREQUAL "")
+        file(TO_CMAKE_PATH "${CASADI_ROOT}" CASADI_ROOT)
+        target_include_directories(idaklu PRIVATE "${CASADI_ROOT}/include")
+        if(EXISTS "${CASADI_ROOT}/lib/libcasadi.a")
+            target_link_libraries(idaklu PRIVATE "${CASADI_ROOT}/lib/libcasadi.a")
+        elseif(EXISTS "${CASADI_ROOT}/lib/libcasadi.so")
+            target_link_libraries(idaklu PRIVATE "${CASADI_ROOT}/lib/libcasadi.so")
+        else()
+            message(FATAL_ERROR "CASADI_ROOT set but no libcasadi found under ${CASADI_ROOT}/lib")
+        endif()
     else()
-        target_link_libraries(idaklu PRIVATE casadi)
+        find_package(casadi CONFIG REQUIRED)
+        # casadi 3.7+ exports the target as casadi::casadi instead of casadi
+        if(TARGET casadi::casadi)
+            target_link_libraries(idaklu PRIVATE casadi::casadi)
+        else()
+            target_link_libraries(idaklu PRIVATE casadi)
+        endif()
     endif()
 endif ()
 
@@ -225,9 +265,25 @@ endif ()
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${PROJECT_SOURCE_DIR})
 # Sundials
+if((EMSCRIPTEN OR CMAKE_CROSSCOMPILING) AND SUNDIALS_ROOT)
+    set(SUNDIALS_INCLUDE_DIR "${SUNDIALS_ROOT}/include" CACHE PATH "" FORCE)
+    set(SUNDIALS_LIBRARIES
+        "${SUNDIALS_ROOT}/lib/libsundials_idas.a"
+        "${SUNDIALS_ROOT}/lib/libsundials_sunlinsolklu.a"
+        "${SUNDIALS_ROOT}/lib/libsundials_sunlinsoldense.a"
+        "${SUNDIALS_ROOT}/lib/libsundials_sunlinsolspbcgs.a"
+        "${SUNDIALS_ROOT}/lib/libsundials_sunmatrixsparse.a"
+        "${SUNDIALS_ROOT}/lib/libsundials_nvecserial.a"
+        "${SUNDIALS_ROOT}/lib/libsundials_core.a"
+        CACHE STRING "" FORCE)
+    if(EXISTS "${SUNDIALS_ROOT}/lib/libsundials_nvecopenmp.a")
+        list(APPEND SUNDIALS_LIBRARIES "${SUNDIALS_ROOT}/lib/libsundials_nvecopenmp.a")
+    endif()
+endif()
 find_package(SUNDIALS REQUIRED)
 message("SUNDIALS found in ${SUNDIALS_INCLUDE_DIR}: ${SUNDIALS_LIBRARIES}")
 target_include_directories(idaklu PRIVATE ${SUNDIALS_INCLUDE_DIR})
+target_include_directories(idaklu PRIVATE ${PROJECT_SOURCE_DIR}/third_party/sundials_shims)
 target_link_libraries(idaklu PRIVATE ${SUNDIALS_LIBRARIES})
 
 # link suitesparse
@@ -236,8 +292,21 @@ target_link_libraries(idaklu PRIVATE ${SUNDIALS_LIBRARIES})
 if (DEFINED VCPKG_ROOT_DIR)
     find_package(SuiteSparse CONFIG REQUIRED)
 else ()
-    find_package(SuiteSparse REQUIRED)
-    message("SuiteSparse found in ${SuiteSparse_INCLUDE_DIRS}: ${SuiteSparse_LIBRARIES}")
+    if(EMSCRIPTEN OR CMAKE_CROSSCOMPILING)
+        set(SuiteSparse_FOUND TRUE)
+        set(SuiteSparse_INCLUDE_DIRS "${SuiteSparse_ROOT}/include/suitesparse")
+        set(SuiteSparse_LIBRARIES
+            "${SuiteSparse_ROOT}/lib/libklu.a"
+            "${SuiteSparse_ROOT}/lib/libamd.a"
+            "${SuiteSparse_ROOT}/lib/libcolamd.a"
+            "${SuiteSparse_ROOT}/lib/libbtf.a"
+            "${SuiteSparse_ROOT}/lib/libsuitesparseconfig.a"
+        )
+        message("SuiteSparse (wasm): using static libs from ${SuiteSparse_ROOT}")
+    else()
+        find_package(SuiteSparse REQUIRED)
+        message("SuiteSparse found in ${SuiteSparse_INCLUDE_DIRS}: ${SuiteSparse_LIBRARIES}")
+    endif()
 endif ()
 include_directories(${SuiteSparse_INCLUDE_DIRS})
 target_link_libraries(idaklu PRIVATE ${SuiteSparse_LIBRARIES})

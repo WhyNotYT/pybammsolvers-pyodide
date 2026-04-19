@@ -1,5 +1,15 @@
 .idea
 .vscode
+.idaklu_wasm
+.pyodide-xbuildenv-0.29.3
+.pyodide_build
+.casadi_wasm
+build
+build_casadi_wasm
+casadi-3.7.0
+emsdk
+SuiteSparse/
+sundials
 cmake-build-*
 *.egg-info
 __pycache__

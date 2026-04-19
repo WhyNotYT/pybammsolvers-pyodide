@@ -27,6 +27,8 @@ CasadiFunction::CasadiFunction(const BaseFunctionType &f) : Expression(), m_func
   }
 }
 
+CasadiFunction::~CasadiFunction() = default;
+
 // only call this once m_arg and m_res have been set appropriately
 void CasadiFunction::operator()()
 {

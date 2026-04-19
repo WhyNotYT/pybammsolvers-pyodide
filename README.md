@@ -1,82 +1,45 @@
-# IDAKLU solver
-
-Standalone repository for the C/C++ solvers used in PyBaMM
+Repository for the C/C++ solvers used in PyBaMM for Pyodide
 
 ## Installation
 
+You can just download the pre built wheel from the `/dist` folder.
+
+## Building from source
+
 ```bash
-pip install pybammsolvers 
+git clone https://github.com/WhyNotYT/pybammsolvers-pyodide
+cd pybammsolvers-pyodide
 ```
 
-## Solvers
+Set up pyodide build and emscripten. (Use python 3.13 for pyodide 0.29)
 
-The following solvers are available:
-- PyBaMM's IDAKLU solver
-
-## Development
-
-### Local builds
-
-For testing new solvers and unsupported architectures, local builds are possible.
-
-#### Nox (Recommended)
-
-Nox can be used to do a quick build:
 ```bash
-pip install nox
-nox
-```
-This will setup an environment and attempt to build the library.
+python -m venv .venv
 
-#### MacOS
+source .venv/bin/activate
 
-Mac dependencies can be installed using brew
-```bash
-brew install libomp
-brew reinstall gcc
-git submodule update --init --recursive
-python install_KLU_Sundials.py
-pip install .
+pip install pyodide-build==0.29.3 "wheel<0.42.0"
+
+pyodide xbuildenv install 0.29.3
+
+git clone https://github.com/emscripten-core/emsdk
+cd emsdk
+
+PYODIDE_EMSCRIPTEN_VERSION=$(pyodide config get emscripten_version)
+./emsdk install ${PYODIDE_EMSCRIPTEN_VERSION}
+./emsdk activate ${PYODIDE_EMSCRIPTEN_VERSION}
+
+cd ..
 ```
 
-#### Linux
+Clone SuiteSpare and Sundials, and build.
 
-Linux installs may vary based on the distribution, however, the basic build can
-be performed with the following commands:
 ```bash
-sudo apt-get install libopenblas-dev gcc gfortran make g++ build-essential
-git submodules update --init --recursive
-pip install cmake casadi setuptools wheel "pybind11[global]"
-python install_KLU_Sundials.py
-pip install .
-```
+git clone https://github.com/DrTimothyAldenDavis/SuiteSparse --depth=1
+git clone https://github.com/llnl/sundials --depth=1
 
-### Testing
 
-The project includes comprehensive test suites:
 
-#### Unit Tests
-Test pybammsolvers functionality in isolation:
-```bash
-nox -s unit            # Run all unit tests
-nox -s integration     # Run all integration tests
-```
+./wasm-build.sh
 
-#### PyBaMM Integration Tests
-Verify compatibility with PyBaMM:
-```bash
-nox -s pybamm-tests                    # Clone/update PyBaMM and run all tests
-nox -s pybamm-tests -- --unit-only     # Run only unit tests
-nox -s pybamm-tests -- --integration-only  # Run only integration tests
-nox -s pybamm-tests -- --no-update     # Skip git pull (use current version)
-nox -s pybamm-tests -- --pybamm-dir ./custom/path  # Use existing PyBaMM clone
-nox -s pybamm-tests -- --branch main  # Use specific branch/tag
-```
-
-The integration tests ensure that changes to pybammsolvers don't break PyBaMM functionality.
-
-### Benchmarks
-Test for performance regressions against released PyBaMM:
-```bash
-nox -s benchmarks
 ```
