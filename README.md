@@ -2,7 +2,7 @@ Repository for the C/C++ solvers used in PyBaMM for Pyodide
 
 ## Installation
 
-You can just download the pre built wheel from the `/dist` folder.
+You can just download the pre built wheel from the realeases or `/dist` folder.
 
 ## Building from source
 
