@@ -9,7 +9,9 @@ build_casadi_wasm
 casadi-3.7.0
 emsdk
 SuiteSparse/
+external/
 sundials
+*.gz
 cmake-build-*
 *.egg-info
 __pycache__

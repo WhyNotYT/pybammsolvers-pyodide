@@ -1,9 +1,74 @@
 #include "CasadiFunctions.hpp"
 #include <casadi/core/sparsity.hpp>
+#include <stdexcept>
 
-CasadiFunction::CasadiFunction(const BaseFunctionType &f) : Expression(), m_func(f)
+namespace {
+
+casadi::Function clone_casadi_function(
+  const CasadiFunction::BaseFunctionType &f,
+  bool deep_copy,
+  const std::string *serialized)
 {
-  DEBUG("CasadiFunction constructor: " << m_func.name());
+  if (!deep_copy) {
+    return f;
+  }
+  if (serialized != nullptr) {
+    return CasadiFunction::BaseFunctionType::deserialize(*serialized);
+  }
+  return CasadiFunction::BaseFunctionType::deserialize(f.serialize());
+}
+
+} // namespace
+
+SerializedCasadiFunctions serialize_casadi_functions(
+  const casadi::Function &rhs_alg,
+  const casadi::Function &jac_times_cjmass,
+  const casadi::Function &jac_action,
+  const casadi::Function &mass_action,
+  const casadi::Function &sens,
+  const casadi::Function &events,
+  const std::vector<casadi::Function*>& var_fcns,
+  const std::vector<casadi::Function*>& dvar_dy_fcns,
+  const std::vector<casadi::Function*>& dvar_dp_fcns)
+{
+  SerializedCasadiFunctions serialized;
+  serialized.rhs_alg = rhs_alg.serialize();
+  serialized.jac_times_cjmass = jac_times_cjmass.serialize();
+  serialized.jac_action = jac_action.serialize();
+  serialized.mass_action = mass_action.serialize();
+  serialized.sens = sens.serialize();
+  serialized.events = events.serialize();
+
+  serialized.var_fcns.reserve(var_fcns.size());
+  for (const auto *var : var_fcns) {
+    serialized.var_fcns.push_back(var->serialize());
+  }
+
+  serialized.dvar_dy_fcns.reserve(dvar_dy_fcns.size());
+  for (const auto *var : dvar_dy_fcns) {
+    serialized.dvar_dy_fcns.push_back(var->serialize());
+  }
+
+  serialized.dvar_dp_fcns.reserve(dvar_dp_fcns.size());
+  for (const auto *var : dvar_dp_fcns) {
+    serialized.dvar_dp_fcns.push_back(var->serialize());
+  }
+
+  return serialized;
+}
+
+CasadiFunction::CasadiFunction(
+  const BaseFunctionType &f,
+  bool deep_copy,
+  const std::string *serialized)
+    : Expression(),
+      m_func(clone_casadi_function(f, deep_copy, serialized))
+{
+  if (m_func.is_null()) {
+    return;
+  }
+
+  DEBUG("CasadiFunction constructor" << (deep_copy ? " (deep copy)" : "") << ": " << m_func.name());
 
   size_t sz_arg;
   size_t sz_res;
@@ -27,11 +92,12 @@ CasadiFunction::CasadiFunction(const BaseFunctionType &f) : Expression(), m_func
   }
 }
 
-CasadiFunction::~CasadiFunction() = default;
-
-// only call this once m_arg and m_res have been set appropriately
+// Contract: nnz_out() == 0 means "no function provided; do not call operator()"
 void CasadiFunction::operator()()
 {
+  if (m_func.is_null()) {
+    throw std::runtime_error("Cannot call operator() on a null CasadiFunction");
+  }
   DEBUG("CasadiFunction operator(): " << m_func.name());
   int mem = m_func.checkout();
   m_func(m_arg.data(), m_res.data(), m_iw.data(), m_w.data(), mem);
@@ -39,16 +105,19 @@ void CasadiFunction::operator()()
 }
 
 expr_int CasadiFunction::out_shape(int k) {
+  if (m_func.is_null()) return 0;
   DEBUG("CasadiFunctions out_shape(): " << m_func.name() << " " << m_func.nnz_out());
   return static_cast<expr_int>(m_func.nnz_out());
 }
 
 expr_int CasadiFunction::nnz() {
+  if (m_func.is_null()) return 0;
   DEBUG("CasadiFunction nnz(): " << m_func.name() << " " << static_cast<expr_int>(m_func.nnz_out()));
   return static_cast<expr_int>(m_func.nnz_out());
 }
 
 expr_int CasadiFunction::nnz_out() {
+  if (m_func.is_null()) return 0;
   DEBUG("CasadiFunction nnz_out(): " << m_func.name() << " " << static_cast<expr_int>(m_func.nnz_out()));
   return static_cast<expr_int>(m_func.nnz_out());
 }
@@ -66,6 +135,9 @@ const std::vector<expr_int>& CasadiFunction::get_col() {
 void CasadiFunction::operator()(const std::vector<sunrealtype*>& inputs,
                                 const std::vector<sunrealtype*>& results)
 {
+  if (m_func.is_null()) {
+    throw std::runtime_error("Cannot call operator() on a null CasadiFunction");
+  }
   DEBUG("CasadiFunction operator() with inputs and results: " << m_func.name());
 
   // Set-up input arguments, provide result vector, then execute function

@@ -9,7 +9,9 @@
 #include <idas/idas_bbdpre.h>         /* access to IDABBDPRE preconditioner          */
 
 #include <nvector/nvector_serial.h>  /* access to serial N_Vector            */
+#ifndef __EMSCRIPTEN__
 #include <nvector/nvector_openmp.h>  /* access to openmp N_Vector            */
+#endif
 #include <sundials/sundials_math.h>  /* defs. of SUNRabs, SUNRexp, etc.      */
 #include <sundials/sundials_config.h>  /* defs. of SUNRabs, SUNRexp, etc.      */
 #include <sundials/sundials_types.h> /* defs. of sunrealtype, sunindextype      */
@@ -116,6 +118,11 @@ inline sunrealtype perturb_time(const sunrealtype t, bool increasing) {
   // Relative nudge ensures progress away from t, absolute nudge covers t == 0
   return (SUN_RCONST(1.0) + delta) * t + delta * sign;
 }
+
+// IDA uses id values of 1.0 for differential and 0.0 for algebraic,
+// but numerical errors can make these not exactly 0 or 1
+inline bool is_differential(sunrealtype id) { return id > 0.5; }
+inline bool is_algebraic(sunrealtype id) { return !(is_differential(id)); }
 
 #ifdef NDEBUG
 #define DEBUG_VECTOR(vector)

@@ -1,6 +1,6 @@
 {
   "name": "pybammsolvers",
-  "version-string": "0.7.0",
+  "version-string": "0.8.2",
   "dependencies": [
     "casadi",
     {

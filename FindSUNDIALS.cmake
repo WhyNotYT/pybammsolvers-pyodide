@@ -27,6 +27,11 @@
 # List of the valid SUNDIALS components
 
 # find the SUNDIALS include directories
+set(_sundials_find_flags "")
+if(EMSCRIPTEN)
+    set(_sundials_find_flags NO_CMAKE_FIND_ROOT_PATH)
+endif()
+
 find_path(SUNDIALS_INCLUDE_DIR
   NAMES
     idas/idas.h
@@ -41,6 +46,7 @@ find_path(SUNDIALS_INCLUDE_DIR
     include
   PATHS
     ${SUNDIALS_ROOT}
+  ${_sundials_find_flags}
   )
 
 set(SUNDIALS_WANT_COMPONENTS
@@ -57,7 +63,7 @@ set(SUNDIALS_WANT_COMPONENTS
 
 # find the SUNDIALS libraries
 foreach(LIB ${SUNDIALS_WANT_COMPONENTS})
-    if (UNIX AND SUNDIALS_PREFER_STATIC_LIBRARIES)
+    if ((UNIX OR EMSCRIPTEN) AND SUNDIALS_PREFER_STATIC_LIBRARIES)
         # According to bug 1643 on the CMake bug tracker, this is the
         # preferred method for searching for a static library.
         # See http://www.cmake.org/Bug/view.php?id=1643.  We search
@@ -80,6 +86,7 @@ foreach(LIB ${SUNDIALS_WANT_COMPONENTS})
             Lib
 	PATHS
 	    ${SUNDIALS_ROOT}
+        ${_sundials_find_flags}
     )
 
     set(SUNDIALS_${LIB}_FOUND FALSE)

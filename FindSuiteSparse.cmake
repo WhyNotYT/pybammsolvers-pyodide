@@ -58,11 +58,17 @@ endif()
 
 # find SuiteSparse config:
 # look for library at positions given by the user
+set(_suitesparse_find_flags "")
+if(EMSCRIPTEN)
+    set(_suitesparse_find_flags NO_CMAKE_FIND_ROOT_PATH)
+endif()
+
 find_library(SUITESPARSE_CONFIG_LIB
   NAMES "suitesparseconfig"
   PATHS ${SuiteSparse_ROOT}
   PATH_SUFFIXES "lib" "lib32" "lib64" "Lib"
   NO_DEFAULT_PATH
+  ${_suitesparse_find_flags}
 )
 # now also include the default paths
 find_library(SUITESPARSE_CONFIG_LIB
@@ -74,8 +80,9 @@ find_library(SUITESPARSE_CONFIG_LIB
 find_path(SUITESPARSE_INCLUDE_DIR
   NAMES "SuiteSparse_config.h"
   PATHS ${SuiteSparse_ROOT}
-  PATH_SUFFIXES "SuiteSparse_config" "SuiteSparse_config/include" "suitesparse" "include" "src" "SuiteSparse_config/Include"
+  PATH_SUFFIXES "include/suitesparse" "SuiteSparse_config" "SuiteSparse_config/include" "suitesparse" "include" "src" "SuiteSparse_config/Include"
   NO_DEFAULT_PATH
+  ${_suitesparse_find_flags}
 )
 #now also look for default paths
 find_path(SUITESPARSE_INCLUDE_DIR
@@ -92,6 +99,7 @@ foreach(_component ${SUITESPARSE_COMPONENTS})
     PATHS ${SuiteSparse_ROOT}
     PATH_SUFFIXES "lib" "lib32" "lib64" "${_component}" "${_component}/Lib"
     NO_DEFAULT_PATH
+    ${_suitesparse_find_flags}
   )
   #now  also include the default paths
   find_library(${_component}_LIBRARY
@@ -103,8 +111,9 @@ foreach(_component ${SUITESPARSE_COMPONENTS})
   find_path(${_component}_INCLUDE_DIR
     NAMES "${_componentLower}.h"
     PATHS ${SuiteSparse_ROOT}
-    PATH_SUFFIXES "${_componentLower}" "include/${_componentLower}" "suitesparse" "include" "src" "${_component}" "${_component}/Include"
+    PATH_SUFFIXES "include/suitesparse" "${_componentLower}" "include/${_componentLower}" "suitesparse" "include" "src" "${_component}" "${_component}/Include"
     NO_DEFAULT_PATH
+    ${_suitesparse_find_flags}
   )
   #now also look for default paths
   find_path(${_component}_INCLUDE_DIR
@@ -120,6 +129,7 @@ find_path(SPQR_INCLUDE_DIR
   PATHS ${SuiteSparse_ROOT}
   PATH_SUFFIXES "spqr" "include/spqr" "suitesparse" "include" "src" "SPQR" "SPQR/Include"
   NO_DEFAULT_PATH
+  ${_suitesparse_find_flags}
 )
 #now also look for default paths
 find_path(SPQR_INCLUDE_DIR
@@ -194,13 +204,14 @@ endif()
 
 # behave like a CMake module is supposed to behave
 include(FindPackageHandleStandardArgs)
+set(_suitesparse_required_vars SUITESPARSE_INCLUDE_DIR SUITESPARSE_LIBRARY)
+if(NOT EMSCRIPTEN)
+    list(APPEND _suitesparse_required_vars BLAS_FOUND)
+endif()
 find_package_handle_standard_args(
   "SuiteSparse"
   FOUND_VAR SuiteSparse_FOUND
-  REQUIRED_VARS
-  BLAS_FOUND
-  SUITESPARSE_INCLUDE_DIR
-  SUITESPARSE_LIBRARY
+  REQUIRED_VARS ${_suitesparse_required_vars}
   HANDLE_COMPONENTS
 )
 

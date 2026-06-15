@@ -5,34 +5,38 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EMSDK_ENV="${EMSDK_ENV:-$ROOT_DIR/emsdk/emsdk_env.sh}"
 VENV_ACTIVATE="${VENV_ACTIVATE:-$ROOT_DIR/.venv/bin/activate}"
 CASADI_ROOT_DEFAULT="$ROOT_DIR/.casadi_wasm"
-CASADI_VERSION="${CASADI_VERSION:-3.7.0}"
+CASADI_VERSION="${CASADI_VERSION:-3.7.2}"
 CASADI_TAG="${CASADI_TAG:-$CASADI_VERSION}"
 CASADI_SRC_DIR="${CASADI_SRC_DIR:-$ROOT_DIR/casadi-$CASADI_VERSION}"
 CASADI_BUILD_DIR="${CASADI_BUILD_DIR:-$ROOT_DIR/build_casadi_wasm}"
+PYODIDE_VERSION="${PYODIDE_VERSION:-314.0.0a1}"
+IDAKLU_PREFIX="${IDAKLU_PREFIX:-$ROOT_DIR/.idaklu_wasm}"
 
 # Keep builds reproducible in fresh clones by defaulting to the local
 # checkout path even if the parent shell has CASADI_ROOT exported.
 CASADI_ROOT="$CASADI_ROOT_DEFAULT"
 CASADI_EXPR="${PYBAMM_IDAKLU_EXPR_CASADI:-ON}"
-PYODIDE_BUILD_CMD="${PYODIDE_BUILD_CMD:-pyodide build}"
-IDAKLU_PREFIX="${IDAKLU_PREFIX:-$ROOT_DIR/.idaklu_wasm}"
 
 usage() {
   cat <<'EOF'
 Usage: ./wasm-build.sh [options]
 
+Build pybammsolvers for Pyodide wasm (Python 3.14 / pyodide 314).
+
 Options:
   --casadi-root <path>      Override CASADI_ROOT (default: ./.casadi_wasm)
-  --casadi on|off           Set PYBAMM_IDAKLU_EXPR_CASADI (default: ON)
-  --casadi-version <ver>    CasADi version/tag (default: 3.7.0)
+  --casadi on|off           Legacy flag (CasADi is always required in v0.8+)
+  --casadi-version <ver>    CasADi version/tag (default: 3.7.2)
   --idaklu-prefix <path>    SuiteSparse/SUNDIALS install prefix (default: ./.idaklu_wasm)
+  --pyodide-version <ver>   Pyodide xbuildenv version (default: 314.0.0a1)
   --clean                   Remove build/dist/.pyodide_build before building
   --no-casadi-root          Unset CASADI_ROOT even if present
   -h, --help                Show this help
 
 Environment overrides:
   EMSDK_ENV, VENV_ACTIVATE, CASADI_ROOT, CASADI_VERSION, CASADI_TAG,
-  CASADI_SRC_DIR, CASADI_BUILD_DIR, IDAKLU_PREFIX, PYBAMM_IDAKLU_EXPR_CASADI, PYODIDE_BUILD_CMD
+  CASADI_SRC_DIR, CASADI_BUILD_DIR, IDAKLU_PREFIX, PYODIDE_VERSION,
+  PYBAMM_IDAKLU_EXPR_CASADI, PYODIDE_BUILD_CMD
 EOF
 }
 
@@ -62,6 +66,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --idaklu-prefix)
       IDAKLU_PREFIX="${2:?missing value for --idaklu-prefix}"
+      shift 2
+      ;;
+    --pyodide-version)
+      PYODIDE_VERSION="${2:?missing value for --pyodide-version}"
       shift 2
       ;;
     --clean)
@@ -112,21 +120,57 @@ echo "[wasm-build] Activating venv: $VENV_ACTIVATE"
 # shellcheck disable=SC1090
 source "$VENV_ACTIVATE"
 
+ensure_build_tools() {
+  python -c "import scikit_build_core" 2>/dev/null || {
+    echo "[wasm-build] Installing scikit-build-core build dependencies"
+    pip install "scikit-build-core>=0.10" "pybind11>=3.0.1" cmake ninja
+  }
+  command -v pyodide >/dev/null 2>&1 || {
+    echo "error: pyodide CLI not found in venv (pip install pyodide-build)" >&2
+    exit 1
+  }
+}
+
+ensure_pyodide_xbuildenv() {
+  echo "[wasm-build] Selecting Pyodide xbuildenv: $PYODIDE_VERSION"
+  if ! pyodide xbuildenv use "$PYODIDE_VERSION"; then
+    echo "[wasm-build] Installing Pyodide xbuildenv: $PYODIDE_VERSION"
+    pyodide xbuildenv install "$PYODIDE_VERSION"
+    pyodide xbuildenv use "$PYODIDE_VERSION"
+  fi
+}
+
 ensure_casadi_wasm() {
   local casadi_lib="$CASADI_ROOT/lib/libcasadi.a"
-  if [[ -f "$casadi_lib" ]]; then
-    echo "[wasm-build] Using existing CasADi static library: $casadi_lib"
+  local casadi_config="$CASADI_ROOT/include/casadi/config.h"
+  local installed_version=""
+
+  if [[ -f "$casadi_config" ]]; then
+    installed_version="$(grep -E '^#define CASADI_VERSION_STRING' "$casadi_config" | sed -E 's/.*"([^"]+)".*/\1/')"
+  fi
+
+  if [[ -f "$casadi_lib" && "$installed_version" == "$CASADI_VERSION" ]]; then
+    echo "[wasm-build] Using existing CasADi $installed_version static library: $casadi_lib"
     return
   fi
 
-  echo "[wasm-build] CasADi $CASADI_VERSION not found at $casadi_lib"
-  echo "[wasm-build] Fetching CasADi sources (tag: $CASADI_TAG)"
-  if [[ ! -d "$CASADI_SRC_DIR/.git" ]]; then
-    rm -rf "$CASADI_SRC_DIR"
-    git clone --branch "$CASADI_TAG" --depth 1 https://github.com/casadi/casadi.git "$CASADI_SRC_DIR"
-  else
+  if [[ -f "$casadi_lib" && -n "$installed_version" && "$installed_version" != "$CASADI_VERSION" ]]; then
+    echo "[wasm-build] CasADi version mismatch: installed $installed_version, need $CASADI_VERSION"
+    rm -rf "$CASADI_ROOT" "$CASADI_BUILD_DIR"
+  fi
+
+  # Prefer vendored sources when present (must match Python casadi==$CASADI_VERSION).
+  if [[ -d "$ROOT_DIR/external/casadi-$CASADI_VERSION" ]]; then
+    CASADI_SRC_DIR="$ROOT_DIR/external/casadi-$CASADI_VERSION"
+  fi
+
+  echo "[wasm-build] Building CasADi $CASADI_VERSION for wasm (Python side must use the same version)"
+  if [[ -d "$CASADI_SRC_DIR/.git" ]]; then
     git -C "$CASADI_SRC_DIR" fetch --tags --depth 1 origin "$CASADI_TAG" || true
     git -C "$CASADI_SRC_DIR" checkout "$CASADI_TAG"
+  elif [[ ! -d "$CASADI_SRC_DIR" ]]; then
+    echo "[wasm-build] Fetching CasADi sources (tag: $CASADI_TAG)"
+    git clone --branch "$CASADI_TAG" --depth 1 https://github.com/casadi/casadi.git "$CASADI_SRC_DIR"
   fi
 
   echo "[wasm-build] Building CasADi for wasm in $CASADI_BUILD_DIR"
@@ -193,14 +237,8 @@ ensure_idaklu_wasm() {
   fi
 
   echo "[wasm-build] Building SuiteSparse/SUNDIALS into $IDAKLU_PREFIX"
-  local old_default_lib_dir="${PYBAMMSOLVERS_DEFAULT_LIB_DIR:-}"
   export PYBAMMSOLVERS_DEFAULT_LIB_DIR="$IDAKLU_PREFIX"
   python "$ROOT_DIR/install_KLU_Sundials.py" --force
-  if [[ -n "$old_default_lib_dir" ]]; then
-    export PYBAMMSOLVERS_DEFAULT_LIB_DIR="$old_default_lib_dir"
-  else
-    unset PYBAMMSOLVERS_DEFAULT_LIB_DIR
-  fi
 
   # Some environments install SUNDIALS into emscripten sysroot but not into our
   # local prefix. If that happens, mirror required headers/libs into IDAKLU_PREFIX.
@@ -265,22 +303,47 @@ ensure_idaklu_wasm() {
   fi
 }
 
-export PYBAMM_IDAKLU_EXPR_CASADI="$CASADI_EXPR"
+build_pyodide_wheel() {
+  local -a build_cmd=(
+    pyodide build
+    --no-isolation
+    --skip-dependency-check
+    -C "cmake.define.USE_PYTHON_CASADI=OFF"
+    -C "cmake.define.CASADI_ROOT=$CASADI_ROOT"
+    -C "cmake.define.SuiteSparse_ROOT=$IDAKLU_PREFIX"
+    -C "cmake.define.SUNDIALS_ROOT=$IDAKLU_PREFIX"
+    -C cmake.define.SUNDIALS_PREFER_STATIC_LIBRARIES=ON
+  )
+  echo "[wasm-build] Running: ${build_cmd[*]}"
+  "${build_cmd[@]}"
+}
+
+ensure_build_tools
+ensure_pyodide_xbuildenv
 ensure_idaklu_wasm
+
+if [[ "$CASADI_EXPR" == "OFF" ]]; then
+  echo "[wasm-build] warning: --casadi off is ignored in v0.8+ (CasADi sources are always built in)" >&2
+fi
+
 if [[ "$UNSET_CASADI_ROOT" -eq 1 ]]; then
   unset CASADI_ROOT
   echo "[wasm-build] CASADI_ROOT unset"
 else
   export CASADI_ROOT
-  if [[ "$PYBAMM_IDAKLU_EXPR_CASADI" == "ON" ]]; then
-    ensure_casadi_wasm
-  fi
+  ensure_casadi_wasm
   echo "[wasm-build] CASADI_ROOT=$CASADI_ROOT"
 fi
-echo "[wasm-build] PYBAMM_IDAKLU_EXPR_CASADI=$PYBAMM_IDAKLU_EXPR_CASADI"
 
-echo "[wasm-build] Running: $PYODIDE_BUILD_CMD"
-eval "$PYODIDE_BUILD_CMD"
+echo "[wasm-build] IDAKLU_PREFIX=$IDAKLU_PREFIX"
+echo "[wasm-build] PYODIDE_VERSION=$PYODIDE_VERSION"
+
+if [[ -n "${PYODIDE_BUILD_CMD:-}" ]]; then
+  echo "[wasm-build] Running custom PYODIDE_BUILD_CMD"
+  eval "$PYODIDE_BUILD_CMD"
+else
+  build_pyodide_wheel
+fi
 
 echo "[wasm-build] Build complete."
 if [[ -d "$ROOT_DIR/dist" ]]; then

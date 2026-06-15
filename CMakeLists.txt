@@ -17,7 +17,27 @@ if (DEFINED ENV{VCPKG_DEFAULT_TRIPLET} AND NOT DEFINED VCPKG_TARGET_TRIPLET)
             CACHE STRING "Vcpkg target triplet")
 endif ()
 
+# Require vcpkg on Windows unless building via conda (which sets CONDA_BUILD=1)
+if(WIN32 AND NOT DEFINED VCPKG_ROOT_DIR AND NOT DEFINED ENV{VCPKG_ROOT_DIR} AND NOT DEFINED ENV{CONDA_BUILD})
+    message(FATAL_ERROR "Windows builds require VCPKG_ROOT_DIR (CMake variable or environment variable) to be set.")
+endif()
+
 project(idaklu)
+
+# Default to .idaklu (install_KLU_Sundials.py output); wasm builds use .idaklu_wasm.
+if(EMSCRIPTEN)
+    if(NOT DEFINED SuiteSparse_ROOT)
+        set(SuiteSparse_ROOT "${CMAKE_SOURCE_DIR}/.idaklu_wasm")
+    endif()
+    if(NOT DEFINED SUNDIALS_ROOT)
+        set(SUNDIALS_ROOT "${CMAKE_SOURCE_DIR}/.idaklu_wasm")
+    endif()
+elseif(NOT WIN32 AND NOT DEFINED SuiteSparse_ROOT)
+    set(SuiteSparse_ROOT "${CMAKE_SOURCE_DIR}/.idaklu")
+endif()
+if(NOT EMSCRIPTEN AND NOT WIN32 AND NOT DEFINED SUNDIALS_ROOT)
+    set(SUNDIALS_ROOT "${CMAKE_SOURCE_DIR}/.idaklu")
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -32,53 +52,16 @@ endif ()
 # casadi seems to compile without the newer versions of std::string
 add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=0)
 
-# --- Python and pybind11 Bridge for Pyodide ---
-if(PYTHON_EXECUTABLE AND NOT Python_EXECUTABLE)
-    set(Python_EXECUTABLE "${PYTHON_EXECUTABLE}")
-endif()
-
-if(EMSCRIPTEN OR CMAKE_CROSSCOMPILING)
-    if(DEFINED ENV{PYTHONINCLUDE} AND NOT "$ENV{PYTHONINCLUDE}" STREQUAL "")
-        set(_pyodide_inc "$ENV{PYTHONINCLUDE}")
-    else()
-        execute_process(
-            COMMAND "${Python_EXECUTABLE}" -c
-            "import sysconfig; print(sysconfig.get_path('include'))"
-            OUTPUT_VARIABLE _pyodide_inc
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-        )
-    endif()
-    if(_pyodide_inc)
-        message(STATUS "Pyodide/cross build: pre-setting Python include dir to ${_pyodide_inc}")
-        set(Python_INCLUDE_DIR  "${_pyodide_inc}" CACHE PATH "Python include dir (Pyodide)"  FORCE)
-        set(Python3_INCLUDE_DIR "${_pyodide_inc}" CACHE PATH "Python3 include dir (Pyodide)" FORCE)
-    else()
-        message(FATAL_ERROR "Could not determine Python include dir for cross-compilation build")
-    endif()
-endif()
-
-set(Python_FIND_STRATEGY LOCATION)
+# Required for Emscripten/Pyodide cross-compiles (pybind11 >= 2.13).
 set(PYBIND11_FINDPYTHON ON)
-find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 find_package(pybind11 CONFIG REQUIRED)
 
-# Check Casadi build flag
-if (NOT DEFINED PYBAMM_IDAKLU_EXPR_CASADI)
-    set(PYBAMM_IDAKLU_EXPR_CASADI ON)
-endif ()
-message("PYBAMM_IDAKLU_EXPR_CASADI: ${PYBAMM_IDAKLU_EXPR_CASADI}")
-
 # Casadi PyBaMM source files
-set(IDAKLU_EXPR_CASADI_SOURCE_FILES "")
-if (${PYBAMM_IDAKLU_EXPR_CASADI} STREQUAL "ON")
-    add_compile_definitions(CASADI_ENABLE)
-    set(IDAKLU_EXPR_CASADI_SOURCE_FILES
-            src/pybammsolvers/idaklu_source/Expressions/Casadi/CasadiFunctions.cpp
-            src/pybammsolvers/idaklu_source/Expressions/Casadi/CasadiFunctions.hpp
-    )
-endif ()
+set(IDAKLU_EXPR_CASADI_SOURCE_FILES
+        src/pybammsolvers/idaklu_source/Expressions/Casadi/CasadiFunctions.cpp
+        src/pybammsolvers/idaklu_source/Expressions/Casadi/CasadiFunctions.hpp
+)
 
-# The complete (all dependencies) sources list should be mirrored in setup.py
 pybind11_add_module(idaklu
         # pybind11 interface
         src/pybammsolvers/idaklu.cpp
@@ -105,6 +88,8 @@ pybind11_add_module(idaklu
         src/pybammsolvers/idaklu_source/observe.hpp
         src/pybammsolvers/idaklu_source/Options.hpp
         src/pybammsolvers/idaklu_source/Options.cpp
+        src/pybammsolvers/idaklu_source/StandaloneNewtonSolver.hpp
+        src/pybammsolvers/idaklu_source/StandaloneNewtonSolver.cpp
         # IDAKLU expressions / function evaluation [abstract]
         src/pybammsolvers/idaklu_source/Expressions/Expressions.hpp
         src/pybammsolvers/idaklu_source/Expressions/Base/Expression.hpp
@@ -115,7 +100,13 @@ pybind11_add_module(idaklu
 )
 
 if (NOT DEFINED USE_PYTHON_CASADI)
-    set(USE_PYTHON_CASADI TRUE)
+    # Windows uses vcpkg for CasADi (no pip wheel exists); Linux/macOS use pip.
+    # Wasm/Pyodide links against a prebuilt static CasADi (CASADI_ROOT).
+    if (WIN32 OR EMSCRIPTEN OR DEFINED CASADI_ROOT OR DEFINED ENV{CASADI_ROOT})
+        set(USE_PYTHON_CASADI FALSE)
+    else()
+        set(USE_PYTHON_CASADI TRUE)
+    endif()
 endif ()
 
 if (${USE_PYTHON_CASADI})
@@ -164,44 +155,32 @@ if (${USE_PYTHON_CASADI})
         message("Found Python CasADi library directory: ${CASADI_LIB_DIR}")
         target_link_directories(idaklu PRIVATE ${CASADI_LIB_DIR})
 
-        # Set RPATH to find libraries relative to the module location
-        # This allows finding casadi in the same Python environment at runtime
-        # Module is at: site-packages/pybammsolvers/idaklu.so
-        # CasADi is at: site-packages/casadi/libcasadi.dylib
-        # SuiteSparse/SUNDIALS are found via DYLD_LIBRARY_PATH/LD_LIBRARY_PATH
-        # (set by noxfile or user environment) pointing to .idaklu/lib
-        # Note: Windows uses vcpkg with static linking, no RPATH needed
-        
-        # For CI wheel builds, use BUILD_WITH_INSTALL_RPATH=FALSE so that
-        # wheel repair tools (delocate/auditwheel) can properly analyze dependencies.
-        # For local development, use BUILD_WITH_INSTALL_RPATH=TRUE so the module
-        # works immediately after pip install without wheel repair.
-        if(DEFINED ENV{CIBUILDWHEEL})
-            set(USE_INSTALL_RPATH_AT_BUILD FALSE)
-        else()
-            set(USE_INSTALL_RPATH_AT_BUILD TRUE)
-        endif()
-        
+        # RPATH entries for `pybammsolvers/idaklu.<abi>.so`:
+        #   @loader_path/../casadi / $ORIGIN/../casadi: finds libcasadi at
+        #     runtime.  .idaklu/{lib,lib64}: vendored SUNDIALS/SuiteSparse
+        #     (used at runtime and by auditwheel/delocate at repair time).
+        #     Windows uses vcpkg static linking; no RPATH needed.
         if (APPLE)
-            set_target_properties(
-                    idaklu PROPERTIES
-                    BUILD_RPATH "${CASADI_LIB_DIR}"
-                    BUILD_RPATH_USE_LINK_PATH FALSE
-                    INSTALL_RPATH "@loader_path/../casadi"
-                    BUILD_WITH_INSTALL_RPATH ${USE_INSTALL_RPATH_AT_BUILD}
+            set(IDAKLU_INSTALL_RPATH
+                "@loader_path/../casadi"
+                "${SUNDIALS_ROOT}/lib"
+                "${SuiteSparse_ROOT}/lib"
             )
         else()
-            set_target_properties(
-                    idaklu PROPERTIES
-                    BUILD_RPATH "${CASADI_LIB_DIR}"
-                    BUILD_RPATH_USE_LINK_PATH FALSE
-                    INSTALL_RPATH "$ORIGIN/../casadi"
-                    BUILD_WITH_INSTALL_RPATH ${USE_INSTALL_RPATH_AT_BUILD}
+            set(IDAKLU_INSTALL_RPATH
+                "$ORIGIN/../casadi"
+                "${SUNDIALS_ROOT}/lib"
+                "${SUNDIALS_ROOT}/lib64"
+                "${SuiteSparse_ROOT}/lib"
+                "${SuiteSparse_ROOT}/lib64"
             )
         endif()
-        # Link against casadi by name, not absolute path, to avoid issues with
-        # pip's isolated build environments changing paths between configure and build
-        # casadi 3.7+ exports the target as casadi::casadi instead of casadi
+        set_target_properties(idaklu PROPERTIES
+            INSTALL_RPATH "${IDAKLU_INSTALL_RPATH}"
+            BUILD_WITH_INSTALL_RPATH TRUE
+        )
+        # casadi 3.7+ exports casadi::casadi; link by name to avoid stale
+        # paths from pip's isolated build environments.
         if(TARGET casadi::casadi)
             target_link_libraries(idaklu PRIVATE casadi::casadi)
         else()
@@ -212,24 +191,17 @@ if (${USE_PYTHON_CASADI})
     endif ()
 else ()
     message("Trying to link against any casadi package apart from the Python one")
-    if(DEFINED CASADI_ROOT AND NOT "${CASADI_ROOT}" STREQUAL "")
-        file(TO_CMAKE_PATH "${CASADI_ROOT}" CASADI_ROOT)
-        target_include_directories(idaklu PRIVATE "${CASADI_ROOT}/include")
-        if(EXISTS "${CASADI_ROOT}/lib/libcasadi.a")
-            target_link_libraries(idaklu PRIVATE "${CASADI_ROOT}/lib/libcasadi.a")
-        elseif(EXISTS "${CASADI_ROOT}/lib/libcasadi.so")
-            target_link_libraries(idaklu PRIVATE "${CASADI_ROOT}/lib/libcasadi.so")
-        else()
-            message(FATAL_ERROR "CASADI_ROOT set but no libcasadi found under ${CASADI_ROOT}/lib")
-        endif()
+    if (DEFINED CASADI_ROOT)
+        list(APPEND CMAKE_PREFIX_PATH "${CASADI_ROOT}")
+    elseif (DEFINED ENV{CASADI_ROOT})
+        list(APPEND CMAKE_PREFIX_PATH "$ENV{CASADI_ROOT}")
+    endif()
+    find_package(casadi CONFIG REQUIRED)
+    # casadi 3.7+ exports the target as casadi::casadi instead of casadi
+    if(TARGET casadi::casadi)
+        target_link_libraries(idaklu PRIVATE casadi::casadi)
     else()
-        find_package(casadi CONFIG REQUIRED)
-        # casadi 3.7+ exports the target as casadi::casadi instead of casadi
-        if(TARGET casadi::casadi)
-            target_link_libraries(idaklu PRIVATE casadi::casadi)
-        else()
-            target_link_libraries(idaklu PRIVATE casadi)
-        endif()
+        target_link_libraries(idaklu PRIVATE casadi)
     endif()
 endif ()
 
@@ -258,33 +230,18 @@ endif ()
 if (MSVC)
     set(OpenMP_CXX_FLAGS "/openmp:experimental")
 endif ()
-find_package(OpenMP)
-if (OpenMP_CXX_FOUND)
-    target_link_libraries(idaklu PRIVATE OpenMP::OpenMP_CXX)
+if (NOT EMSCRIPTEN)
+    find_package(OpenMP)
+    if (OpenMP_CXX_FOUND)
+        target_link_libraries(idaklu PRIVATE OpenMP::OpenMP_CXX)
+    endif ()
 endif ()
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${PROJECT_SOURCE_DIR})
 # Sundials
-if((EMSCRIPTEN OR CMAKE_CROSSCOMPILING) AND SUNDIALS_ROOT)
-    set(SUNDIALS_INCLUDE_DIR "${SUNDIALS_ROOT}/include" CACHE PATH "" FORCE)
-    set(SUNDIALS_LIBRARIES
-        "${SUNDIALS_ROOT}/lib/libsundials_idas.a"
-        "${SUNDIALS_ROOT}/lib/libsundials_sunlinsolklu.a"
-        "${SUNDIALS_ROOT}/lib/libsundials_sunlinsoldense.a"
-        "${SUNDIALS_ROOT}/lib/libsundials_sunlinsolspbcgs.a"
-        "${SUNDIALS_ROOT}/lib/libsundials_sunmatrixsparse.a"
-        "${SUNDIALS_ROOT}/lib/libsundials_nvecserial.a"
-        "${SUNDIALS_ROOT}/lib/libsundials_core.a"
-        CACHE STRING "" FORCE)
-    if(EXISTS "${SUNDIALS_ROOT}/lib/libsundials_nvecopenmp.a")
-        list(APPEND SUNDIALS_LIBRARIES "${SUNDIALS_ROOT}/lib/libsundials_nvecopenmp.a")
-    endif()
-endif()
 find_package(SUNDIALS REQUIRED)
 message("SUNDIALS found in ${SUNDIALS_INCLUDE_DIR}: ${SUNDIALS_LIBRARIES}")
 target_include_directories(idaklu PRIVATE ${SUNDIALS_INCLUDE_DIR})
-target_include_directories(idaklu PRIVATE ${PROJECT_SOURCE_DIR}/third_party/sundials_shims)
-target_link_libraries(idaklu PRIVATE ${SUNDIALS_LIBRARIES})
 
 # link suitesparse
 # if using vcpkg, use config mode to
@@ -292,21 +249,23 @@ target_link_libraries(idaklu PRIVATE ${SUNDIALS_LIBRARIES})
 if (DEFINED VCPKG_ROOT_DIR)
     find_package(SuiteSparse CONFIG REQUIRED)
 else ()
-    if(EMSCRIPTEN OR CMAKE_CROSSCOMPILING)
-        set(SuiteSparse_FOUND TRUE)
-        set(SuiteSparse_INCLUDE_DIRS "${SuiteSparse_ROOT}/include/suitesparse")
-        set(SuiteSparse_LIBRARIES
-            "${SuiteSparse_ROOT}/lib/libklu.a"
-            "${SuiteSparse_ROOT}/lib/libamd.a"
-            "${SuiteSparse_ROOT}/lib/libcolamd.a"
-            "${SuiteSparse_ROOT}/lib/libbtf.a"
-            "${SuiteSparse_ROOT}/lib/libsuitesparseconfig.a"
-        )
-        message("SuiteSparse (wasm): using static libs from ${SuiteSparse_ROOT}")
-    else()
-        find_package(SuiteSparse REQUIRED)
-        message("SuiteSparse found in ${SuiteSparse_INCLUDE_DIRS}: ${SuiteSparse_LIBRARIES}")
-    endif()
+    find_package(SuiteSparse REQUIRED COMPONENTS KLU AMD COLAMD BTF)
+    message("SuiteSparse found in ${SuiteSparse_INCLUDE_DIRS}: ${SuiteSparse_LIBRARIES}")
 endif ()
 include_directories(${SuiteSparse_INCLUDE_DIRS})
-target_link_libraries(idaklu PRIVATE ${SuiteSparse_LIBRARIES})
+
+# Pyodide/Emscripten side modules must embed SuiteSparse symbols referenced
+# transitively from libsundials_sunlinsolklu.a (e.g. klu_solve).
+if(EMSCRIPTEN)
+    target_link_libraries(idaklu PRIVATE ${SUNDIALS_LIBRARIES})
+    target_link_libraries(idaklu PRIVATE
+        "-Wl,--whole-archive"
+        ${SuiteSparse_LIBRARIES}
+        "-Wl,--no-whole-archive"
+    )
+else()
+    target_link_libraries(idaklu PRIVATE ${SUNDIALS_LIBRARIES})
+    target_link_libraries(idaklu PRIVATE ${SuiteSparse_LIBRARIES})
+endif()
+
+install(TARGETS idaklu LIBRARY DESTINATION ${SKBUILD_PROJECT_NAME})

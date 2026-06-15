@@ -3,7 +3,11 @@
 #include "common.hpp"
 #include <type_traits>
 
+#if defined(__EMSCRIPTEN__)
+#define NV_DATA NV_DATA_S
+#else
 #define NV_DATA NV_DATA_OMP  // Serial: NV_DATA_S
+#endif
 
 template<class T>
 int residual_eval(sunrealtype tres, N_Vector yy, N_Vector yp, N_Vector rr, void *user_data)

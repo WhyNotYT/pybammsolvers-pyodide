@@ -1,5 +1,7 @@
 #include "IDAKLUSolverGroup.hpp"
+#ifndef __EMSCRIPTEN__
 #include <omp.h>
+#endif
 #include <optional>
 
 std::vector<Solution> IDAKLUSolverGroup::solve(
@@ -106,11 +108,12 @@ std::vector<Solution> IDAKLUSolverGroup::solve(
 
   std::optional<std::string> exception_message;
 
+#ifndef __EMSCRIPTEN__
   omp_set_num_threads(m_solvers.size());
   #pragma omp parallel for
-  for (int i = 0; i < m_solvers.size(); i++) {
+  for (int i = 0; i < static_cast<int>(m_solvers.size()); i++) {
     try {
-      for (int j = 0; j < solves_per_thread; j++) {
+      for (int j = 0; j < static_cast<int>(solves_per_thread); j++) {
         const std::size_t index = i * solves_per_thread + j;
         const sunrealtype *y = y0 + index * y0_np.shape(1);
         const sunrealtype *yp = yp0 + index * yp0_np.shape(1);
@@ -125,6 +128,22 @@ std::vector<Solution> IDAKLUSolverGroup::solve(
       }
     }
   }
+#else
+  for (int i = 0; i < static_cast<int>(m_solvers.size()); i++) {
+    try {
+      for (int j = 0; j < static_cast<int>(solves_per_thread); j++) {
+        const std::size_t index = i * solves_per_thread + j;
+        const sunrealtype *y = y0 + index * y0_np.shape(1);
+        const sunrealtype *yp = yp0 + index * yp0_np.shape(1);
+        const sunrealtype *input = inputs_data + index * inputs.shape(1);
+        results[index] = m_solvers[i]->solve(t_eval, t_interp, y, yp, input, save_adaptive_steps, save_interp_steps, logger);
+      }
+    } catch (std::exception &e) {
+      exception_message = std::string(e.what());
+      break;
+    }
+  }
+#endif
 
   if (exception_message.has_value()) {
     py::set_error(PyExc_ValueError, exception_message->c_str());
